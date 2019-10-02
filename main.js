@@ -8,419 +8,273 @@ const adapter   = new utils.Adapter('etamon');
 const xpath     = require('xpath');
 const xmldom    = require('xmldom').DOMParser;
 const select = xpath.useNamespaces({"eta": "http://www.eta.co.at/rest/v1"});
-var   menu;
-var   variables;
-var   addedChannels = 0;
-var   addedObjects = 0;
-var   addedVariables = 0;
-var   skippedVariables = 0;
+const core = require('@iobroker/adapter-core'); // Get common adapter utils
 
-var   elements = [];
-var   elementsValue = [];
-var   channels = [];
-
+var menu;
+var variables;
+var mapping;
 
 adapter.on('ready', function () {
 	// Timeout for adapter if ETA takes too long to respond (overall process)
 	setTimeout( function() {
 		adapter.log.error("ETA service monitoring timeout [" + adapter.config.etaTimeout + "]!");
         adapter.stop();
-    }, adapter.config.etaTimeout);
-    // Optional delete any "etamon" variable if existing
-	adapter.log.debug("** Debug Mode: " + adapter.config.etaDebug);
-	if(adapter.config.etaDebug) {
-		// After deletion the read will be started
-    	deleteEta();
-    } else {
-    	// Start reading the data from ETA unit
-    	readEta();
-    }
+	}, adapter.config.etaTimeout);
+	main();
 });
 
-function readEta() {
-	// Check if the expectedt global variable (etamon) does exist in the ETA device
-	adapter.log.debug("** Retrieve ETA variable etamon");
-	request(
-		{
-			url: adapter.config.etaService+"vars/etamon",
-			method: "GET"
-		},
-		function(error, response, content) {
-			if(error) {
-				adapter.log.error("** ETA connection issue: "+error);
-			} else {
-				adapter.log.debug("** Checking if global variable is available");
-				if(content.indexOf("<error>") > -1) {
-					// When restarting/updating the ETA unit, the stored variable will get lost
-					request(
-						{
-							url: adapter.config.etaService+"vars/etamon",
-							method: "PUT"
-						},
-						function(error, response, content) {
-							adapter.log.debug("** Created global variable - next: getMenu(true)");
-							getMenu(true);
-						}
-					).catch(
-						function() { /* FIX possible ETA status 400 */ }
-					)
-				} else {
-					adapter.log.debug("** Global variable is available - next: getMenu(false)");
-					getMenu(false);
-				}
-			}
-		}
-	).catch(
-		function() { /* FIX possible ETA status 404 */ }
-	)
-
+function toXML(body, response, resolveWithFullResponse) {
+	return new xmldom().parseFromString(body);
 }
 
-function getMenu(createStructure) {
-	adapter.log.debug("** do: getMenu("+createStructure+")");
-	request(
-		{
-			url: adapter.config.etaService+"menu"
-		},
-		function(error, response, content) {
-			if(!error && response.statusCode == 200) {
-				// Everything is ok - lets parse the XML
-				menu = new xmldom().parseFromString(content);
-			} else {
-				adapter.log.error(error);
-			}
-		}
-	).then(
-		function(content) {
-			if(createStructure) {
-				adapter.log.debug("** Menu variables read - next: setVariables");
-				setVariables();
-			} else {
-				adapter.log.debug("** Menu variables read - next: getVariables");
-				getVariables();
-				// adapter.stop();
-			}
-		}
-	);
+/**
+ * @param {XMLDocument} menu
+ */
+function readFUBs() {
+	mapping = {};
+	request.put(adapter.config.etaService+"vars/etamon")
+	.then(function (content) {
+		adapter.log.info("**** Adding ETA variable: "+content);
+	})
+	.catch(function (error) {
+		adapter.log.info(error);
+	})
+	.finally(function () {
+		//adapter.log.debug("Creating objects from menu: "+menu);
+		var fubs = select("/eta:eta/eta:menu/eta:fub", menu);
+		adapter.log.debug("Found "+fubs.length+" fubs.");
+		createFUBs(fubs, 0);
+	});
 }
 
-function setVariables() {
-	var menuNodes = (select('//eta:*[@uri]', menu));
-	var addedNodes = 0;
-	adapter.log.debug("** ETA menu nodes found: "+menuNodes.length);
-	
-	for(var i = 0; i<menuNodes.length; i++) {
-		adapter.log.silly("** Try to add ETA menu node ["+i+"/"+menuNodes.length+"]: "+menuNodes[i].getAttribute("uri"));
-		request(
-			{
-				url: adapter.config.etaService+"vars/etamon" + menuNodes[i].getAttribute("uri"),
-				method: "PUT"
+function createFUBs(fubs, counter) {
+	if (counter < fubs.length) {
+		adapter.log.debug("Processing fub:"+fubs[counter]);
+		var fubName = fubs[counter].getAttribute("name");
+		var fubID = fubs[counter].getAttribute("uri").substr(1).replace("/", "_");
+		adapter.log.silly("*** Creating channel: " + fubName);	
+		adapter.extendObject(fubID, {
+			type: 'channel',
+			common: {
+				name: fubName
 			},
-			function(error, response, content) {
-				// adapter.log.silly("**** Adding ETA variable - error: "+error);
-				// adapter.log.silly("**** Adding ETA variable - response: "+response);
-				adapter.log.silly("**** Adding ETA variable: "+content);
-			}
-		).then(
-			function() {
-				addedNodes++;
-				addedVariables++;
-				if(addedNodes == menuNodes.length) {
-					adapter.log.debug("** "+addedVariables+" ETA variables added, "+skippedVariables+" variables skipped - next: getVariables");
-					// adapter.stop();
-					getVariables();
-					// continue
-				}
-			}
-		).catch(
-			function() {
-				addedNodes++;
-				skippedVariables++;
-				if(addedNodes == menuNodes.length) {
-					adapter.log.debug("** "+addedVariables+" ETA variables added, "+skippedVariables+" variables skipped - next: getVariables");
-					// adapter.stop();
-					getVariables();
-					// continue
-				}
-			}
-		)
-	}
-}
-
-function getVariables() {
-	//console.log("getVariables 01");
-	request(
-		{
-			url: adapter.config.etaService+"vars/etamon"
-		},
-		function(error, response, content) {
-			if(!error && response.statusCode == 200) {
-				// Everything is ok - lets parse the XML
-				//console.log("getVariables 02");
-				variables = new xmldom().parseFromString(content);
-				//console.log("getVariables 03");
-			} else {
-				//console.log("getVariables 04");
-				adapter.log.error(error);
-			}
-		}
-	).then(
-		function() {
-			//console.log("getVariables 05");
-			adapter.log.debug("** Global ETA variables read [then] - next: setObjects");
-			setObjects();
-		}
-	).catch(
-		function() {
-			//console.log("getVariables 06");
-			adapter.log.error("** Global ETA variables not readable");
-			adapter.stop();
-		}
-	)
-}
-
-function setObjects() {
-	//console.log("setObjects 01");
-	
-	var menuNodes = (select('//eta:*[@uri]', menu));
-	var addedNodes = 0;
-	var addedVariables = 0;
-	var skippedVariables = 0;
-	var thisUri = "";
-	adapter.log.debug("** ETA menu nodes found: "+menuNodes.length);
-	//console.log("setObjects 02");
-	
-	
-	for(var i = 0; i<menuNodes.length; i++) {
-		//console.log("setObjects 03 - "+i);
-		//adapter.log.debug("** Try to add ETA menu node ["+i+"/"+menuNodes.length+"]: "+menuNodes[i].getAttribute("uri"));
-		var parentNodes = (select('ancestor::eta:*[@uri]', menuNodes[i]));
-		var parentPath = "";
-		for(var pkey in parentNodes) {
-			var parentNode = parentNodes[pkey];
-			if (parentNode.getAttribute("uri")!="") {
-				if(parentPath!="") {
-					parentPath = parentPath + ".";
-				}
-				parentPath = parentPath + parentNode.getAttribute("uri").substr(1);
-			}
-		}
+			native: {}
+		});
+		adapter.log.debug("*** Created channel: " + fubName);
 		
-		if(parentPath!="") {
-			thisUri = parentPath.split("/").join("_")+"."+menuNodes[i].getAttribute("uri").substr(1).split("/").join("_");
-		} else {
-			thisUri = menuNodes[i].getAttribute("uri").substr(1).split("/").join("_");
-		}
-		//adapter.log.debug("** Create object ["+menuNodes[i].getAttribute("name")+"] "+thisUri);
-		var varObjects = (select('//eta:variable[@uri="'+menuNodes[i].getAttribute("uri").substr(1)+'"]',variables));
-		//console.log("** Create object ["+menuNodes[i].getAttribute("name")+"] "+thisUri);
-		//adapter.stop();
-		if(varObjects.length==0) {
-			//console.log("setObjects 03.a - "+i);
-			channels.push([thisUri, menuNodes[i].getAttribute("name")]);
-			adapter.log.silly("** Channel: "+thisUri+" ("+menuNodes[i].getAttribute("name")+") ["+channels.length+"]");
-			//setChannel(thisUri, menuNodes[i].getAttribute("name"));
-			//console.log("** addedChannels: "+addedChannels);
-		} else {
-			//console.log("setObjects 03.b - "+i);
-			// Read attributes from value node
-			var AttUri           = (select('./@uri',           varObjects[0])[0].nodeValue);
-			var AttStrValue      = (select('./@strValue',      varObjects[0])[0].nodeValue);
-			var AttUnit          = (select('./@unit',          varObjects[0])[0].nodeValue);
-			var AttDecPlaces     = (select('./@decPlaces',     varObjects[0])[0].nodeValue);
-			var AttScaleFactor   = (select('./@scaleFactor',   varObjects[0])[0].nodeValue);
-			var AttAdvTextOffset = (select('./@advTextOffset', varObjects[0])[0].nodeValue);
-			var AttText          = (select('./text()',         varObjects[0])[0].nodeValue);
-			
-			//console.log("object to add: "+thisUri+" => "+menuNodes[i].getAttribute("name"));
-			
-			// Set params for object
-			if(AttUnit.length>0) {
-				var outValue = AttText * 1.0 / AttScaleFactor * 1.0;
-				var outType  = "number"
-				var outUnit  = AttUnit;
-				if(AttUnit=="°C") {
-					var outRole  = "value.temperature";
-				} else {
-					var outRole  = "state";
-				}
+		//createObjects(fubID, fubID, select("eta:fub/eta:fub/eta:object", fubs[counter]), 0, function() {
+		createObjects(fubID, fubID, select("./eta:object", fubs[counter]), 0, function() {
+			createFUBs(fubs, ++counter);
+		});
+	} else {
+		adapter.log.debug("Storing configuration: " + mapping);
+		adapter.extendObject('mapping', {
+			type: 'state',
+			common: {
+				name: 'Uri-Object-Mapping',
+				type: 'text',
+				role: 'text'
+			},
+			native: {}
+		}, function(err) {
+			if(!err) {
+				adapter.log.debug("*** Configuration created");
 			} else {
-				var outValue = AttStrValue;
-				var outType  = "text"
-				var outUnit  = AttUnit;
-				var outRole  = "state";
+				adapter.log.error("*** Configuration not created: "+err);
 			}
-			adapter.log.silly("*** outUri  : " + thisUri);
-			adapter.log.silly("***   strValue     : " + AttStrValue);
-			adapter.log.silly("***   unit         : " + AttUnit);
-			adapter.log.silly("***   decPlaces    : " + AttDecPlaces);
-			adapter.log.silly("***   scaleFactor  : " + AttScaleFactor);
-			adapter.log.silly("***   advTextOffset: " + AttAdvTextOffset);
-			adapter.log.silly("***   text()       : " + AttText);
-			adapter.log.silly("***     outType  : " + outType);
-			adapter.log.silly("***     outValue : " + outValue);
-			adapter.log.silly("***     outUnit  : " + outUnit);
-			adapter.log.silly("***     outRole  : " + outRole);
-			
-			// Create object and store data
-			//setObject(thisUri, menuNodes[i].getAttribute("name"), outType, outUnit, outRole);
-			//setValue (thisUri, outValue);
-			elements.push([thisUri, menuNodes[i].getAttribute("name"), outType, outUnit, outRole, outValue]);
-			adapter.log.silly("** Element: "+thisUri+" ("+menuNodes[i].getAttribute("name")+") ["+elements.length+"]");
+			adapter.setState(adapter.name + "." + adapter.instance + ".mapping", JSON.stringify(mapping), true);
+			request.get(adapter.config.etaService+"vars/etamon")
+			.then(function (data) {
+				readData(toXML(data));
+			});
+		});		
+	}
+}
+
+/**
+ * @param {string} parent
+ * @param {Node[]} nodes
+ */
+function createObjects(fubID, parent, nodes, counter, callback) {
+	if (counter < nodes.length) {
+		var node = nodes[counter];
+		adapter.log.silly("Creating Object for: " + node);
+		var objectURI = node.getAttribute("uri");
+		var tmpID = objectURI.substr(1).split("/").join("_");
+		var objectID = parent + "." + tmpID.replace(fubID, "").substr(1);
+		var objectName = node.getAttribute("name");
+
+		//adapter.log.debug("Registering variable: " + objectID);
+		request.put(adapter.config.etaService+"vars/etamon" + objectURI)
+		.catch(function (error) {
+			adapter.log.info(error);
+		})
+		.finally(function () {
+			adapter.log.silly("Loading variable data: " + adapter.config.etaService+"var"+objectURI);
+			request.get(adapter.config.etaService+"var"+objectURI)
+			.then(function (content) {
+				adapter.log.silly("Loaded: " + content);
+				var objData = toXML(content);
+	
+				var AttUri           = (select('./@uri',           objData));
+				var AttStrValue      = (select('./@strValue',      objData));
+				var AttUnit          = (select('./@unit',          objData));
+				var AttDecPlaces     = (select('./@decPlaces',     objData));
+				var AttScaleFactor   = (select('./@scaleFactor',   objData));
+				var AttAdvTextOffset = (select('./@advTextOffset', objData));
+				var AttText          = (select('./text()',         objData));
+	
+				var outUnit;
+				var outRole = "";
+				var outType = "";
+
+				// Set params for object
+				if(AttUnit.length>0) {
+					outType  = "number";
+					outUnit  = AttUnit;
+					if(AttUnit=="°C") {
+						var outRole  = "value.temperature";
+					} else {
+						outRole  = "";
+					}
+				} else {
+					outType  = "text";
+					outUnit  = AttUnit;
+					outRole  = "";
+				}
+					
+				adapter.log.silly("Extending Object: " + objectID + " with type " + outType + " determined from " + objData);
+				adapter.extendObject(objectID, {
+					type: 'state',
+					common: {
+						name: objectName,
+						type: outType,
+						unit: outUnit,
+						role: outRole,
+						uri: objectURI
+					},
+					native: {}
+				}, function(err) {
+					if(!err) {
+						adapter.log.silly("*** Object created " + objectID);
+					} else {
+						adapter.log.error("*** Object not created: "+err);
+					}
+				});
+				if (mapping[objectURI] == null) {
+					mapping[objectURI] = [];
+				}
+				mapping[objectURI].push(objectID);
+			})
+			.finally(function () {
+				createObjects(fubID, objectID, select('./eta:object', node), 0, function() {
+					createObjects(fubID, parent, nodes, ++counter, callback);
+				});
+			});
+		});
+
+
+	} else {
+		callback();
+	}
+}
+
+function init() {
+	// Check if the expectedt global variable (etamon) does exist in the ETA device
+	request.get(adapter.config.etaService+"vars/etamon")
+	.then(function (data) {
+		readData(toXML(data));
+	})
+	.catch(function (error) {
+		adapter.log.silly("Create/Fill etamon variable.");
+		request.get(adapter.config.etaService+"menu")
+		.then(function (menuResponse) {
+			menu = toXML(menuResponse);
+			adapter.log.silly("** Menu variables read - next: createObjects");
+			readFUBs();
+		})
+		.catch(function (e) {
+			adapter.log.error(e);
+			adapter.stop();
+		});
+	});
+}
+
+function readMapping(counter) {
+	if (counter < variables.length) {
+		var variable = variables[counter];
+		
+		// Read attributes from value node
+		var AttStrValue      = (select('./@strValue',      variable)[0].nodeValue);
+		var AttUnit          = (select('./@unit',          variable)[0].nodeValue);
+		var AttScaleFactor   = (select('./@scaleFactor',   variable)[0].nodeValue);
+		var AttText          = (select('./text()',         variable)[0].nodeValue);
+		var uri				 = (select('./@uri',		   variable)[0].nodeValue);
+
+		//adapter.log.debug("Determining objectID from mapping for: " + uri);
+		var objects = mapping["/" + uri];
+
+		// Set params for object
+		var outValue;
+		if(AttUnit.length>0) {
+			outValue = (AttText * 1.0) / (AttScaleFactor * 1.0);
+		} else {
+			outValue = AttStrValue;
 		}
-		//console.log("setObjects 04");
-		//console.log(varObjects[0]);
-	}
-	//console.log("setObjects 05");
-	adapter.log.debug("** Channels: "+channels.length);
-	adapter.log.debug("** Elements: "+elements.length);
-	// adapter.stop();
-	createChannels();
-	
-	
-	/*
-	for(var i = 0; i<channels.length; i++) {
-		setChannel(channels[i][0], channels[i][1]);
-	}
-	for(var i = 0; i<eöements.length; i++) {
-		setObject(eöements[i][0], eöements[i][1], eöements[i][2], eöements[i][3], eöements[i][4]);
-	}
-	*/
-	// setChannel(thisUri, menuNodes[i].getAttribute("name")); -> channels
-	// setObject(thisUri, menuNodes[i].getAttribute("name"), outType, outUnit, outRole) -> eöements
-	// setValue (thisUri, outValue);
-	
-	/*
-	adapter.log.silly("** addedObjects: "+addedObjects+", addedVariables: "+addedVariables);
-	
-	adapter.log.debug("** ETA Adapter finished");
-	*/
-	//adapter.stop();
-}
 
-function createChannels() {
-	adapter.log.debug("** Channels to create: "+channels.length);
-	if(channels.length>0) {	
-		createChannel();
+		for (var obj in objects) {
+			var objectID = adapter.name + "." + adapter.instance + "." + objects[obj];
+			adapter.setState(objectID, outValue, true);
+			adapter.log.debug("Set state of " + objectID + " to " + outValue);
+		}
+		readMapping(++counter);
 	} else {
-		adapter.log.debug("** Channels created - next: setObjects");
-		createObjects();
-	}
-}
-
-function createChannel() {
-	adapter.log.silly("*** Creating channel: " + channels[0][0]);
-    adapter.setObjectNotExistsAsync(channels[0][0], {
-        type: 'channel',
-        common: {
-            name: channels[0][1]
-        },
-        native: {}
-    }, function(err) {
-    	if(err) {
-	    	adapter.log.silly("*** Channel created");
-		    channels.shift();
-		    createChannels();
-	    } else {
-	    	adapter.log.silly("*** Channel not created (already exists?): "+err);
-		    channels.shift();
-		    createChannels();
-	    }
-    });
-	adapter.log.silly("*** Created channel: " + channels[0][0]);
-}
-
-function createObjects() {
-	adapter.log.debug("** Elements to create: "+elements.length);
-	if(elements.length>0) {	
-		elementsValue.push(elements[0]);
-		createObject();
-	} else {
-		adapter.log.debug("** Elements created - next: writeObjects");
-		writeObjects();
-	}
-}
-
-function createObject() {
-	adapter.log.silly("*** Creating element: " + elements[0][0]);
-    adapter.setObjectNotExists(elements[0][0], {
-        type: 'state',
-        common: {
-            name: elements[0][1],
-            type: elements[0][2],
-            unit: elements[0][3],
-            role: elements[0][4]
-        },
-        native: {}
-    }, function(err) {
-    	if(!err) {
-	    	adapter.log.silly("*** Element created");
-    		elements.shift();
-    		createObjects();
-	    } else {
-	    	adapter.log.error("*** Element not created: "+err);
-    		elements.shift();
-    		createObjects();
-	    }
-    });
-	adapter.log.silly("*** Created element: " + elements[0][0]);
-}
-
-function writeObjects() {
-	adapter.log.debug("** Elements to write: "+elementsValue.length);
-	if(elementsValue.length>0) {	
-		writeObject();
-	} else {
-		adapter.log.debug("** Elements written - next: NOTHING");
-		adapter.log.info("** ETA Adapter finished");
-		// Skript finished...
+		adapter.log.debug("Done reading data");
 		adapter.stop();
 	}
 }
 
-function writeObject() {
-	adapter.log.silly("*** Writing element: " + elementsValue[0][0]+" => "+elementsValue[0][5]);
-    adapter.setStateAsync(elementsValue[0][0], {
-    	val: elementsValue[0][5], 
-    	ack: true
-    }, function(err) {
-    	if(!err) {
-	    	adapter.log.silly("*** Element written");
-    		elementsValue.shift();
-    		createObjects();
-	    } else {
-	    	adapter.log.error("*** Element not written: "+err);
-    		elementsValue.shift();
-    		createObjects();
-	    }
-    });
-	adapter.log.silly("*** Written element: " + elementsValue[0][0]+" => "+elementsValue[0][5]);
+function readData(data) {
+	variables = (select('//eta:variable', data));
+	doReadData();
 }
 
-function deleteEta() {
-	adapter.log.debug("** Deleting ETA variabel etamon");
-	request(
-		{
-			url: adapter.config.etaService+"vars/etamon",
-			method: "DELETE"
-		},
-		function(error, response, content) {
-			if(!error && response.statusCode == 200) {
-				adapter.log.debug("** ETA variable deleted!");
+function doReadData() {
+	adapter.log.debug("Reading data now: " +  variables.length);
+
+	if (mapping) {
+		readMapping(0);
+	} else {
+		adapter.getState(adapter.name + "." + adapter.instance + ".mapping", function (err, state) {
+			if (!err) {
+				adapter.log.debug("Fetched mapping");
+				mapping = JSON.parse(state.val);
+				readMapping(0);
 			} else {
-				adapter.log.error(error);
-			}
-		}
-	).then(
-		function() {
-			adapter.log.debug("** Deleted ETA variabel etamon");
-			readEta();
-		}
-	).catch(
-		function() {
-			adapter.log.debug("** No ETA variabel etamon found to delete");
-			readEta();
-		}
-	);
-	adapter.log.debug("** Deleted ETA variabel etamon");
+				adapter.stop();
+			}		
+		});
+	}
+}
+
+function deleteEtamonVariable() {
+	adapter.log.debug("** Deleting ETA variabel etamon");
+	request.delete(adapter.config.etaService+"vars/etamon")
+	.then(function(response) {
+		adapter.log.debug("** ETA variable deleted!");
+	})
+	.catch(function(e) {
+		adapter.log.debug("** No ETA variable etamon found to delete");
+	})
+	.finally(function () {
+		init();
+	});
+}
+
+function main() {
+	if (adapter.config.etaDebug) {
+		deleteEtamonVariable();
+	} else {
+		init();
+	}
 }
